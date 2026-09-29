@@ -315,12 +315,14 @@ void process_retransmissions(
 	stream<ap_uint<16> >&			freeListFifo,
 	stream<ap_uint<16> >&			releaseFifo,
 	stream<retransEvent>&			retrans2event,
-	stream<ackMeta>&				retrans2ack_meta
+	stream<ackMeta>&				retrans2ack_meta,
+	stream<ap_uint<16> >&			qpi2retrans_flush
 ) {
 #pragma HLS PIPELINE II=1
 #pragma HLS INLINE off
 
-	enum retransStateType {MAIN, INSERT_0, INSERT_1, UPDATE_0, UPDATE_1, RETRANS_0, RETRANS_1, RETRANS_2, TIMER_RETRANS_0};
+	enum retransStateType {MAIN, INSERT_0, INSERT_1, UPDATE_0, UPDATE_1, RETRANS_0, RETRANS_1, RETRANS_2, TIMER_RETRANS_0,
+		FLUSH_0, FLUSH_1};
 	static retransStateType rt_state = MAIN;
 	static retransUpdate update;
 	static ap_uint<16> curr;
@@ -332,11 +334,20 @@ void process_retransmissions(
 	static bool upd_is_ack;
 	static bool upd_rd_start;
 	static ap_uint<24> acked_psn;
+	static ap_uint<16> flush_qpn;
 
 	switch (rt_state)
 	{
 	case MAIN:
-		if (!rx2retrans_upd.empty())
+		// A QP set up again drops what its previous session left: requests never acknowledged
+		// would head its list, where the new session's PSNs cannot cover them
+		if (!qpi2retrans_flush.empty())
+		{
+			qpi2retrans_flush.read(flush_qpn);
+			pointerReqFifo.write(pointerReq(flush_qpn, true));
+			rt_state = FLUSH_0;
+		}
+		else if (!rx2retrans_upd.empty())
 		{
 			rx2retrans_upd.read(update);
 			// A READ response at PSN p acknowledges requests up to p-1, an ACK up to p
@@ -602,6 +613,46 @@ void process_retransmissions(
 			}
 		}
 		break;
+	case FLUSH_0:
+		if (!pointerRspFifo.empty())
+		{
+			pointerRspFifo.read(ptrMeta);
+			if (ptrMeta.valid)
+			{
+				metaReqFifo.write(retransMetaReq(ptrMeta.head));
+				curr = ptrMeta.head;
+				rt_state = FLUSH_1;
+			}
+			else
+			{
+				// Nothing left: release the lock
+				pointerUpdFifo.write(pointerUpdate(flush_qpn, ptrMeta));
+				rt_state = MAIN;
+			}
+		}
+		break;
+	case FLUSH_1:
+		// Free every entry, with no completion: the session they belong to is gone
+		if (!metaRspFifo.empty())
+		{
+			metaRspFifo.read(meta);
+			if (meta.valid)
+			{
+				releaseFifo.write(curr);
+			}
+			if (meta.valid && !meta.isTail)
+			{
+				metaReqFifo.write(retransMetaReq(meta.next));
+				curr = meta.next;
+			}
+			else
+			{
+				ptrMeta.valid = false;
+				pointerUpdFifo.write(pointerUpdate(flush_qpn, ptrMeta));
+				rt_state = MAIN;
+			}
+		}
+		break;
 	} // switch
 }
 
@@ -635,7 +686,8 @@ void retransmitter(
 	stream<retransmission>& timer2retrans_req,
 	stream<retransEntry>&	tx2retrans_insertRequest,
 	stream<retransEvent>&	retrans2event,
-	stream<ackMeta>&		retrans2ack_meta
+	stream<ackMeta>&		retrans2ack_meta,
+	stream<ap_uint<16> >&	qpi2retrans_flush
 ) {
 //#pragma HLS DATAFLOW
 //#pragma HLS INTERFACE ap_ctrl_none register port=return
@@ -679,6 +731,7 @@ void retransmitter(
 		rt_freeListFifo,
 		rt_releaseFifo,
 		retrans2event,
-		retrans2ack_meta
+		retrans2ack_meta,
+		qpi2retrans_flush
 	);
 }

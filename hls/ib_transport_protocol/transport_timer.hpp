@@ -90,7 +90,8 @@ template <int INSTID = 0>
 void transport_timer(	
     stream<rxTimerUpdate>&	rxClearTimer_req,
 	stream<ap_uint<24> >&	txSetTimer_req,
-	stream<retransmission>&	timer2retrans_req
+	stream<retransmission>&	timer2retrans_req,
+	stream<ap_uint<16> >&	qpi2timer_clear
 ) {
 #pragma HLS PIPELINE II=1
 #pragma HLS INLINE off
@@ -115,9 +116,18 @@ void transport_timer(
 	ap_uint<24> setQP;
 	transportTimerEntry entry;
 	ap_uint<1> operationSwitch = 0;
+	ap_uint<16> clearQP;
 
 
-	if (!rxClearTimer_req.empty())
+	if (!qpi2timer_clear.empty())
+	{
+		// A QP set up again starts with its timer stopped and no retry counted
+		qpi2timer_clear.read(clearQP);
+		transportTimerTable[clearQP].time = 0;
+		transportTimerTable[clearQP].active = false;
+		transportTimerTable[clearQP].retries = 0;
+	}
+	else if (!rxClearTimer_req.empty())
 	{
 		rxClearTimer_req.read(tt_update);
 		if (!tt_update.stop)

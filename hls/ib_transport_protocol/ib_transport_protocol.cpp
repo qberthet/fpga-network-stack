@@ -2095,6 +2095,11 @@ void qp_interface(
 	stream<stateTableEntry>&	stateTable2qpi_rsp,
 	stream<ifStateReq>&			qpi2stateTable_upd_req,
 	stream<ifMsnReq>&			if2msnTable_init
+#ifdef RETRANS_EN
+	,
+	stream<ap_uint<16> >&		qpi2retrans_flush,
+	stream<ap_uint<16> >&		qpi2timer_clear
+#endif
 ) {
 #pragma HLS inline off
 #pragma HLS pipeline II=1
@@ -2131,6 +2136,12 @@ void qp_interface(
 				// Default case: Call both, conventional call 
 				qpi2stateTable_upd_req.write(ifStateReq(context.qp_num, context.newState, context.remote_psn, context.local_psn));
 				if2msnTable_init.write(ifMsnReq(context.qp_num, context.r_key)); //TODO store virtual address somewhere??
+#ifdef RETRANS_EN
+				// A new session on this QP: drop what the previous one left in the retransmitter
+				// and stop its timer, or they act on requests nobody will acknowledge
+				qpi2retrans_flush.write(context.qp_num);
+				qpi2timer_clear.write(context.qp_num);
+#endif
 			}
 
 			// qpi2stateTable_upd_req.write(ifStateReq(context.qp_num, context.newState, context.remote_psn, context.local_psn));
@@ -2514,6 +2525,10 @@ void ib_transport_protocol(
 	static stream<ackMeta> retrans2ack_meta("retrans2ack_meta");
 	#pragma HLS STREAM depth=4 variable=rx_exh2ack_meta
 	#pragma HLS STREAM depth=32 variable=retrans2ack_meta
+	static stream<ap_uint<16> > qpi2retrans_flush("qpi2retrans_flush");
+	static stream<ap_uint<16> > qpi2timer_clear("qpi2timer_clear");
+	#pragma HLS STREAM depth=4 variable=qpi2retrans_flush
+	#pragma HLS STREAM depth=4 variable=qpi2timer_clear
 #endif
 
 	//TODO this is a hack
@@ -2521,7 +2536,12 @@ void ib_transport_protocol(
 	#pragma HLS STREAM depth=2 variable=tx_dstQpFifo
 
 	// Interface
+#ifdef RETRANS_EN
+	qp_interface<INSTID>(s_axis_qp_interface, stateTable2qpi_rsp, qpi2stateTable_upd_req, if2msnTable_init,
+		qpi2retrans_flush, qpi2timer_clear);
+#else
 	qp_interface<INSTID>(s_axis_qp_interface, stateTable2qpi_rsp, qpi2stateTable_upd_req, if2msnTable_init);
+#endif
 
 
 	// ------------------------------------------------------------------------------------------------
@@ -2799,7 +2819,8 @@ void ib_transport_protocol(
 	transport_timer<INSTID>(
 		rxClearTimer_req,
 		txSetTimer_req,
-		timer2retrans_req
+		timer2retrans_req,
+		qpi2timer_clear
 	);
 
 	retransmitter<INSTID>(	
@@ -2809,7 +2830,8 @@ void ib_transport_protocol(
 		timer2retrans_req,
 		tx2retrans_insertRequest,
 		retransmitter2exh_eventFifo,
-		retrans2ack_meta
+		retrans2ack_meta,
+		qpi2retrans_flush
 	);
 
 	ack_meta_merger<INSTID>(rx_exh2ack_meta, retrans2ack_meta, m_axis_rx_ack_meta);
